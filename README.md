@@ -7,6 +7,8 @@ Native Android SDK for vending machine integration via Bluetooth Low Energy. Thi
 - 🔐 **Secure Authentication**: Token storage using Jetpack Security (EncryptedSharedPreferences)
 - 📡 **BLE Communication**: Full Bluetooth Low Energy support for vending machine communication
 - 💳 **Transaction Processing**: Complete transaction flow with backend integration
+- 🏢 **Cost Centers**: Charge vending transactions to a cost center instead of the user's purse
+- 🛠️ **Training Mode**: Maintenance mode for article assignment without real transactions
 - 🎯 **Simple API**: Easy-to-use singleton pattern matching iOS SDK interface
 - 📱 **Android 6.0+**: Compatible with API 23 and later
 
@@ -44,7 +46,7 @@ dependencies {
 
 ```kotlin
 dependencies {
-    implementation("com.mycompanee:vending-sdk:1.0.2")
+    implementation("com.mycompanee:vending-sdk:1.1.0")
 }
 ```
 
@@ -136,6 +138,75 @@ class MainActivity : AppCompatActivity() {
 }
 ```
 
+### Cost Centers
+
+If an RFID card linked to the user's purse has a cost center assigned, the transaction can be charged to that cost center instead of the user's purse. Query the available cost centers before starting a vending session:
+
+```kotlin
+val costCentersResult = sdk.getAvailableCostCenters(authKey, apiKey)
+costCentersResult.fold(
+    onSuccess = { costCenters ->
+        if (costCenters.isEmpty()) {
+            // No cost centers - start normally with the purse
+            sdk.startVending(authKey, apiKey, vendingMachineNumber = 123, /* ... */)
+        } else {
+            // Let the user pick a cost center, then:
+            // sdk.startVending(..., costCenterId = costCenters[0].id, /* ... */)
+        }
+    },
+    onFailure = { error -> println("Failed to load cost centers: ${error.message}") }
+)
+```
+
+When a cost center is selected, the SDK sends a fixed dummy balance of 8888 cents to the machine (`overrideBalance`); the machine releases the sale and the backend books the transaction on the cost center. The booked cost center is returned in `VendingSendTransactionResponse.costCenter`.
+
+### Training Mode
+
+The training mode is a maintenance mode for service technicians: no real transactions are booked. Instead, every product dispensed at the machine is reported to the app, which can then assign an article to the selected slot (selection).
+
+**Trigger:** The mode is enabled when the purse is named `TRAININGMODE`. The SDK exposes this check; the host app asks the user how to proceed:
+
+```kotlin
+val purseInfoResult = sdk.getPurseInfo(authKey, apiKey)
+purseInfoResult.onSuccess { purse ->
+    if (VendingSdk.isTrainingPurse(purse)) {
+        // Ask the user: "Im Trainingsmodus starten?" (training) or normal vending
+    }
+}
+```
+
+**Start with the `trainingMode` parameter:**
+
+```kotlin
+sdk.startVending(
+    authKey = authKey,
+    apiKey = apiKey,
+    vendingMachineNumber = 123,
+    trainingMode = true,
+    statusCallback = { status -> println(status) },
+    transactionCallback = { /* not called in training mode */ },
+    trainingProductCallback = { product ->
+        // product.selection, product.amount (cents), product.fingerprint, product.isLoading
+        // Show your article assignment UI here
+    }
+)
+```
+
+**Article assignment APIs** (used by your assignment UI):
+
+```kotlin
+// Create a new article (case-insensitive PLU duplicate check)
+sdk.createVendingArticle(authKey, plu = "4711", name = "Water 0.5l")
+
+// Assign an article to a selection on a machine (creates or overwrites the mapping)
+sdk.assignVendingArticle(authKey, vendingMachineNumber = 123, selection = 3, vendingArticleId = article.id)
+
+// Refresh base data (articles, mappings, machines, cost centers)
+sdk.reloadVendingBaseData(authKey)
+```
+
+Journal entries for training events (start, sale, finish, article create/assign/overwrite) are sent to the backend automatically (fire-and-forget).
+
 ## API Reference
 
 ### VendingSdk
@@ -159,12 +230,39 @@ Start the vending workflow.
 - `apiKey: String` - API key for third-party API access
 - `vendingMachineNumber: Int` - Machine number to connect to
 - `connectionTimeout: Long` - Timeout in milliseconds (default: 30000)
+- `costCenterId: Long?` - Optional cost center ID to charge the transaction to (default: `null` = charge purse)
+- `trainingMode: Boolean` - When true, no real transactions are sent (default: `false`)
 - `statusCallback: (String) -> Unit` - Callback for status messages
-- `transactionCallback: (VendingTransactionResult) -> Unit` - Callback for transaction results
+- `transactionCallback: (VendingTransactionResult) -> Unit` - Callback for transaction results (not called in training mode)
+- `trainingProductCallback: ((VendingTrainingProduct) -> Unit)?` - Called for every product dispensed in training mode
 
 #### `abortVending()`
 
-Abort the current vending session and disconnect from the BLE device.
+Abort the current vending session and disconnect from the BLE device. In training mode this also writes the FINISH_TRAINING journal entry.
+
+#### `getPurseInfo(authKey: String, apiKey: String): Result<Purse>` (suspend)
+
+Load the full purse (including its name) for the given authKey. Use with `isTrainingPurse` to detect a training purse.
+
+#### `isTrainingPurse(purse: Purse): Boolean` (companion)
+
+Returns true when the purse is named "TRAININGMODE".
+
+#### `getAvailableCostCenters(authKey: String, apiKey: String): Result<List<CostCenter>>` (suspend)
+
+Cost centers available to the current purse (empty if none). A cost center is available if an RFID card linked to the purse has a cost center assigned.
+
+#### `createVendingArticle(authKey: String, plu: String, name: String): Result<VendingArticle>` (suspend)
+
+Create a new vending article (training mode). Fails when an article with the same PLU already exists (case-insensitive).
+
+#### `assignVendingArticle(authKey: String, vendingMachineNumber: Int, selection: Int, vendingArticleId: Long): Result<VendingBaseDataResponse>` (suspend)
+
+Assign (or overwrite) an article to a selection on a vending machine; returns the refreshed vending base data.
+
+#### `reloadVendingBaseData(authKey: String): Result<VendingBaseDataResponse>` (suspend)
+
+Reload the vending base data (articles, mappings, machines, cost centers).
 
 ### VendingTransactionResult
 
@@ -214,6 +312,10 @@ The Android SDK maintains functional parity with the iOS SDK:
 | `VendingSDK.shared` | `VendingSdk.getInstance(context)` |
 | `VendingSDK.getSDKVersion()` | `VendingSdk.getSdkVersion()` |
 | `startVending(authKey:apiKey:vendingMachineNumber:connectionTimeout:statusCallback:transactionCallback:)` | `startVending(authKey, apiKey, vendingMachineNumber, connectionTimeout, statusCallback, transactionCallback)` |
+| `startVending(...:costCenterId:trainingMode:trainingProductCallback:)` | `startVending(..., costCenterId, trainingMode, statusCallback, transactionCallback, trainingProductCallback)` |
+| `getPurseInfo(authKey:apiKey:completion:)` | `getPurseInfo(authKey, apiKey)` (suspend) |
+| `isTrainingPurse(_:)` | `isTrainingPurse(purse)` |
+| `getAvailableCostCenters(authKey:apiKey:completion:)` | `getAvailableCostCenters(authKey, apiKey)` (suspend) |
 | `abortVending()` | `abortVending()` |
 
 ## Example App

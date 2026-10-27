@@ -46,7 +46,7 @@ dependencies {
 
 ```kotlin
 dependencies {
-    implementation("com.mycompanee:vending-sdk:1.1.0")
+    implementation("com.mycompanee:vending-sdk:1.2.0")
 }
 ```
 
